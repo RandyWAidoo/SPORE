@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spore-clustering"
-version = "0.1.0b1"
+version = "0.1.0b2"
 authors = [
   { name="Randolph Wiredu-Aidoo", email="randyaidoo.dev@gmail.com" },
 ]
@@ -15,7 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
-dependencies = ["scikit-learn~=1.6.1", "numpy~=2.2.1", "hnswlib~=0.8.0"]
+dependencies = ["scikit-learn~=1.6", "numpy~=2.2", "hnswlib~=0.8.0"]
 license-files = ["LICEN[CS]E*"]
 
 [project.urls]
