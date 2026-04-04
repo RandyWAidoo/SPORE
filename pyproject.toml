@@ -18,5 +18,10 @@ classifiers = [
 dependencies = ["scikit-learn~=1.6", "numpy~=2.2", "hnswlib~=0.8.0"]
 license-files = ["LICEN[CS]E*"]
 
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+branch = "main"
+changelog_file = "CHANGELOG.md"
+
 [project.urls]
 Homepage = "https://github.com/RandyWAidoo/SPORE.git"
