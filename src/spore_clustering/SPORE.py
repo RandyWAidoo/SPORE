@@ -232,7 +232,7 @@ def _get_density_proxies(
     densities: NDArray[float_t] = np.ones(N, dtype=float_t)
 
     for i in range(N):
-        _n_copies: int = int(n_copies[i] if n_copies.shape[0] else 1)
+        _n_copies: int = int(n_copies[i])
         _dists: NDArray[float_t] = dists[i]
         num_neighbors_used: int = min(density_neighbors, len(_dists) - _n_copies)
 
@@ -345,13 +345,12 @@ def _expand_graph_clusters(
             cluster_size += 1
             total_clustered += 1
 
-            _n_copies: size_t = (n_copies[curr_idx] if n_copies.shape[0] else size_t(1))
+            _n_copies: size_t = n_copies[curr_idx]
             nearby: NDArray[idx_t] = neighbors[curr_idx][:_n_copies + expansion_neighbors]
             nearby_dists: NDArray[float_t] = dists[curr_idx][:_n_copies + expansion_neighbors]
-            mask: NDArray[np.bool_]
-
+            
             # Filter for unvisited points
-            mask = (classifications_buff[nearby] == NOISE_LABEL)
+            mask: NDArray[np.bool_] = (classifications_buff[nearby] == NOISE_LABEL)
             nearby, nearby_dists = nearby[mask], nearby_dists[mask]
 
             # Filter for positive z-score, not absolute value, so that nearby points are always included
@@ -459,7 +458,7 @@ def _reassign_clusters(
         # Define a notion of 'far' beyond which other-cluster neighbors cannot be considered for joining
         far: float = np.inf
         if far_percentile < 100:
-            far = float(np.percentile(dists[:, -1], far_percentile))
+            far = float(np.percentile(dists[:, reassignment_neighbors], far_percentile))
         
         # Perform reassignment
         recluster_list = deque(recluster_list)
@@ -469,7 +468,7 @@ def _reassign_clusters(
         while len(recluster_list):
             idx: int = recluster_list.popleft()
             k: int = min(
-                N - 1,
+                reassignment_neighbors,
                 max( 
                     log2N,
                     expansion_neighbors,
@@ -477,7 +476,7 @@ def _reassign_clusters(
                 ) if use_heuristics
                 else reassignment_neighbors
             )
-            _n_copies: size_t = (n_copies[idx] if n_copies.shape[0] else size_t(1))
+            _n_copies: size_t = n_copies[idx]
             _nearby_idxs: NDArray[idx_t] = neighbors[idx][:_n_copies + k]
             _dists: NDArray[float_t] = dists[idx][:_n_copies + k]
             if len(_nearby_idxs) <= _n_copies:
@@ -530,7 +529,7 @@ def _reassign_clusters(
             classifications_buff[g] = curr_cluster_idx
         handled += len(g)
         if show_progress:
-            print(f"\r\033[K| Recomputing labels: {handled/N*100}%", end="")
+            print(f"\r\033[K| Densifying labels: {handled/N*100}%", end="")
         g.clear()
 
     # Recalculate the number of clusters
