@@ -9,9 +9,9 @@
 
 SPORE builds clusters in three stages:
 
-1. **k-NN graph construction** — a global nearest-neighbor graph is built (exact or approximate), with neighbor counts scaling as ~*O*(log *N*) by default.
-2. **Variance-aware BFS expansion** — clusters are seeded from densest points outward. Edges are accepted only if their distance is statistically consistent with the cluster's *evolving* internal distance distribution — mean and variance updated incrementally as expansion proceeds. This prevents bridging across low-density gaps while preserving irregular shapes.
-3. **Reassignment** — clusters below `min_cluster_size` are merged into nearby larger ones using a composite score weighing proximity, relative size, density, and angular isotropy, or labeled as noise.
+1. **k-NN graph construction**: a global nearest-neighbor graph is built (exact or approximate), with neighbor counts scaling as ~*O*(log *N*) by default.
+2. **Variance-aware BFS expansion**: clusters are seeded from the densest points outward. Nearby points are accepted only if their distance is statistically consistent with the cluster's particular distance distribution, the mean and variance of which are updated as neighbors are accepted. This allows for density- and shape-adaptive cluster identification.
+3. **Reassignment**: clusters below `min_cluster_size` are merged into nearby larger ones using a composite score weighing proximity, relative size, density, and angular isotropy, or labeled as noise.
 
 ## Installation
 

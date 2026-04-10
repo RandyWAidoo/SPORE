@@ -194,18 +194,18 @@ Whether SPORE automatically manages lifecycle updates to the stored neighbor dat
 
 ### Heuristics and neighbor search backend
 
-* **use_heuristics** — enables additional stability and performance heuristics.
-* **exact_knn** — exact vs approximate nearest-neighbor search.
-* **nn_kwargs** — additional backend parameters.
-* **shuffle_for_hnsw** — improves approximate neighbor stability by shuffling input order.
-* **shuffle_seed** — random seed for shuffling and randomized seeding.
-* **n_jobs** — number of threads used during neighbor index construction (`-1` uses all cores).
+* **use_heuristics**: enables additional stability and performance heuristics.
+* **exact_knn**: exact vs approximate nearest-neighbor search.
+* **nn_kwargs**: additional backend parameters.
+* **shuffle_for_hnsw**: improves approximate neighbor stability by shuffling input order.
+* **shuffle_seed**: random seed for shuffling and randomized seeding.
+* **n_jobs**: number of threads used during neighbor index construction (`-1` uses all cores).
 
 ---
 
 ### Output and diagnostics
 
-* **show_progress** — display progress information during clustering.
+* **show_progress**: display progress information during clustering.
 
 ---
 
