@@ -22,6 +22,7 @@ license-files = ["LICEN[CS]E*"]
 version_toml = ["pyproject.toml:project.version"]
 branch = "main"
 changelog_file = "CHANGELOG.md"
+allow_zero_version = true
 
 [project.urls]
 Homepage = "https://github.com/RandyWAidoo/SPORE.git"
