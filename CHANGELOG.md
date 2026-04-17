@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.1.2 (2026-04-17)
+
+### Bug Fixes
+
+- Limit neighbor parameters to max_connectivity; limit compute of neighborhood_percentile
+  ([`efd4b9f`](https://github.com/RandyWAidoo/SPORE/commit/efd4b9f86eda6679f52a69ee5c6efae6d77f4c3a))
+
+
 ## v0.1.1 (2026-04-10)
 
 ### Bug Fixes
