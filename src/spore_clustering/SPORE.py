@@ -819,6 +819,7 @@ class SPORE(BaseEstimator, ClusterMixin):
         seeding_order = (seeding_order if seeding_order is not None else _DEFAULTS_AND_CONSTS['seeding_order'])
         use_heuristics = (use_heuristics if use_heuristics is not None else _DEFAULTS_AND_CONSTS['use_heuristics'])
         min_connectivity = (min_connectivity if min_connectivity is not None else _DEFAULTS_AND_CONSTS['min_connectivity'])
+        max_connectivity = (max_connectivity if max_connectivity is not None else N - 1)
         far_percentile = (
             far_percentile if far_percentile is not None 
             else _DEFAULTS_AND_CONSTS['far_percentile'] if use_heuristics
@@ -835,14 +836,14 @@ class SPORE(BaseEstimator, ClusterMixin):
         
         log2N = max(1, int(np.log2(N)))
         if expansion_neighbors is None:
-            expansion_neighbors = min(int(N**0.4), 2*log2N)
+            expansion_neighbors = min(max_connectivity, int(N**0.4), 2*log2N)
         min_retained = (
             max(int(retention_rate * expansion_neighbors), 1) if retention_rate is not None
             else _DEFAULTS_AND_CONSTS['min_retained'] if min_retained is None
             else min_retained
         )
         if density_neighbors is None: 
-            density_neighbors = log2N
+            density_neighbors = min(max_connectivity, log2N)
         
         min_cluster_size = int(
             (
@@ -851,7 +852,7 @@ class SPORE(BaseEstimator, ClusterMixin):
             else int(N**_DEFAULTS_AND_CONSTS['min_cluster_size']) 
         )
         reassignment_neighbors = min(
-            N - 1,
+            max_connectivity,
             reassignment_neighbors if reassignment_neighbors is not None
             else min(
                 _bounded_sample_count(N, 4*log2N),
@@ -859,7 +860,6 @@ class SPORE(BaseEstimator, ClusterMixin):
             ) if use_heuristics 
             else min_cluster_size
         )
-        max_connectivity = (max_connectivity if max_connectivity is not None else N - 1)
 
         # Define final connectivity (degree of the knn graph)
         connectivity = min(max_connectivity, max(density_neighbors, reassignment_neighbors, expansion_neighbors, min_connectivity))
@@ -946,7 +946,7 @@ class SPORE(BaseEstimator, ClusterMixin):
             n_copies, neighbors, dists = _get_neighborhoods(X=X, connectivity=connectivity, nn_obj=nn_obj, use_heuristics=use_heuristics)
 
         # Compute expansion from a percentile of knn distance
-        if neighborhood_percentile is not None:
+        if neighborhood_percentile is not None and not dindex_only:
             neighborhoods: NDArray[float_t] = dists[:, expansion_neighbors]
             mean_neighborhood: float_t = np.mean(neighborhoods, dtype=float_t)
             std_neighborhood: float_t = np.std(neighborhoods, dtype=float_t)
