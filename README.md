@@ -1,17 +1,16 @@
 # SPORE
 
-**Skeleton Propagation Over Recalibrating Expansions** — a graph-based clustering algorithm for arbitrary-shape, arbitrary-scale clusters.
+**SPORE (Skeleton Propagation Over Recalibrating Expansions)** is a graph-based clustering algorithm for nonlinear clusters under heterogeneous density and weak boundary contrast.
 
 ![SPORE](https://raw.githubusercontent.com/RandyWAidoo/SPORE/main/docs/logo.png)
 
+## The Algorithm
 
-## How it works
+SPORE builds a reusable k-nearest-neighbor graph, then runs two main phases:
 
-SPORE builds clusters in three stages:
+1. **Expansion**: clusters are seeded from dense regions and expanded with breadth-first search over the k-NN graph. Candidate neighbors are accepted only when their distances are consistent with the growing cluster's evolving distance statistics. This lets each cluster adapt to its own local density scale while still following nonconvex shapes.
 
-1. **k-NN graph construction**: a global nearest-neighbor graph is built (exact or approximate), with neighbor counts scaling as ~*O*(log *N*) by default.
-2. **Variance-aware BFS expansion**: clusters are seeded from the densest points outward. Nearby points are accepted only if their distance is statistically consistent with the cluster's particular distance distribution, the mean and variance of which are updated as neighbors are accepted. This allows for density- and shape-adaptive cluster identification.
-3. **Reassignment**: clusters below `min_cluster_size` are merged into nearby larger ones using a composite score weighing proximity, relative size, density, and angular isotropy, or labeled as noise.
+2. **Small-Cluster Reassignment (SCR)**: clusters below `min_cluster_size` are treated as fragments. Fragment points are reassigned to established clusters using local k-NN majority voting, with candidate neighbors filtered by cluster size and density compatibility. Any fragments still unresolved after SCR can be labeled as noise or left unchanged, depending on `post_reassignment_policy`.
 
 ## Installation
 
@@ -19,7 +18,7 @@ SPORE builds clusters in three stages:
 pip install spore-clustering
 ```
 
-## Quick start
+## Quick Start
 
 ```python
 from spore_clustering import SPORE
@@ -27,18 +26,22 @@ from spore_clustering import SPORE
 labels = SPORE().fit_predict(X)
 ```
 
-## Key parameters
+## Key Parameters
 
-| Parameter | Description |
-|---|---|
-| `expansion` | Z-score threshold controlling how aggressively clusters grow |
-| `neighborhood_percentile` | Bounded alternative to `expansion`; typical values: 25, 50, 75, 93.75 |
-| `retention_rate` | Fraction of neighbors that must pass variance filter to continue expansion |
-| `min_cluster_size` | Minimum cluster size (int) or exponent for *N*-relative scaling (float) |
+| Parameter                  | Description                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `z`                        | Z-score threshold controlling how aggressively clusters expand                                                |
+| `z_percentile`             | Percentile-based alternative to `z`; ignored if `z` is provided                                               |
+| `retention_rate`           | Fraction of neighbors that must pass the expansion filter for traversal to continue                           |
+| `min_cluster_size`         | Minimum established-cluster size; ints are absolute counts, floats are interpreted as `N ** min_cluster_size` |
+| `max_z`                    | Maximum z-score allowed for candidate receiving-cluster neighbors during SCR                                  |
+| `max_z_percentile`         | Percentile-based alternative to `max_z`; ignored if `max_z` is provided                                       |
+| `max_scr_rounds`           | Maximum number of SCR propagation rounds                                                                      |
+| `post_reassignment_policy` | Whether remaining unresolved small clusters become noise or are left unchanged                                |
 
 See the [full API reference](https://github.com/RandyWAidoo/SPORE/blob/main/docs/01-SPORE.md) for all parameters.
 
-## Reusing a precomputed neighbor index
+## Reusing a Precomputed Neighbor Index
 
 ```python
 dindex = SPORE.DataIndex(
@@ -51,16 +54,18 @@ dindex = SPORE.DataIndex(
 labels = SPORE(dindex=dindex, retention_rate=0.25).fit_predict(X)
 ```
 
-## Complexity
+## Time Complexity
 
-With approximate k-NN and default neighbor scaling (*k* ~ log *N*):
+With an efficient k-NN backend and default neighbor scaling, where `k ~ O(log N)`:
 
-| Phase | Complexity |
-|---|---|
-| k-NN construction | *O*(*Nd* log *N*) |
-| BFS expansion | *O*(*N* log *N*) |
-| Reassignment | *O*(*Rd* log *N*), *R* ≤ *N* |
+| Phase                     | Complexity                                                     |
+| ------------------------- | -------------------------------------------------------------- |
+| k-NN graph construction   | *O*(*N d* log *N*)                                             |
+| Expansion                 | *O*(*N* log *N*)                                               |
+| SCR                       | *O*(*N* log *N*)                                               |
 
-## scikit-learn compatibility
+In the worst case, with a bounded number of SCR rounds, the clustering phases after neighbor construction scale as *O*(*N* log *N*). Including approximate k-NN construction, the practical overall complexity is *O*(*N d* log *N*).
 
-SPORE follows standard scikit-learn estimator conventions: `fit`, `fit_predict`, `get_params`, `set_params`.
+## Scikit-learn Compatibility
+
+SPORE follows standard scikit-learn estimator conventions: `fit`, `fit_predict`, `get_params`, and `set_params`.

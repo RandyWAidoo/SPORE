@@ -9,34 +9,73 @@ class SPORE.DataIndex:
         neighbors=None,
         dists=None,
         dataset_scale=None,
-        use_heuristics=None,
     )
 ```
 
-A lightweight container for holding neighbor graph state and related metadata so SPORE can avoid rebuilding k-NN structures.
+A lightweight container for holding neighbor graph state and related metadata so SPORE can avoid rebuilding k-NN structures across runs.
 
-### Parameters / Attributes
+## Parameters / Attributes
 
-**connectivity : int, optional**
-Neighbor count stored per point (width of `neighbors` / `dists`).
+### `connectivity : int, optional`
 
-**n_copies : int, optional**
-Internal multiplier used by certain backends/heuristics (implementation-specific).
+Neighbor count stored per point.
 
-**neighbors : ndarray, optional**
-Neighbor indices per point, typically shape `(N, connectivity)`.
+This usually matches the second dimension of `neighbors` and `dists`.
 
-**dists : ndarray, optional**
-Neighbor distances per point, typically shape `(N, connectivity)`.
+---
 
-**dataset_scale : float, optional**
-A characteristic scale estimate of the dataset used for normalization or heuristics.
+### `n_copies : int, optional`
 
-**use_heuristics : bool, optional**
-Whether the stored index corresponds to a heuristic-enabled configuration.
+Number of copied or expanded points represented by the stored index, when applicable.
 
-### Methods
+This is mainly used internally.
 
-**clear()**
-Clears all stored fields (sets them to `None`).
+---
 
+### `neighbors : ndarray, optional`
+
+Neighbor indices for each point.
+
+Typically has shape:
+
+```text
+(N, connectivity)
+```
+
+---
+
+### `dists : ndarray, optional`
+
+Neighbor distances for each point.
+
+Typically has shape:
+
+```text
+(N, connectivity)
+```
+
+---
+
+### `dataset_scale : float, optional`
+
+Characteristic scale estimate of the dataset.
+
+SPORE may use this when reusing stored neighbor graph data.
+
+---
+
+## Methods
+
+### `clear()`
+
+Clears all stored fields by setting them to `None`.
+
+This resets:
+
+```text
+connectivity
+n_copies
+neighbors
+dists
+dataset_scale
+```

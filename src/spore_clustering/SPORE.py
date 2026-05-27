@@ -27,16 +27,15 @@ _DEFAULTS_AND_CONSTS: dict[str, Any] = dict(
     shuffle_seed = 42,
     n_jobs = -1,
 
-    use_heuristics = True,
     show_progress = False,
     min_connectivity = 1,
     seeding_order = 'density',
-    neighborhood_percentile = 50,
+    z_percentile = 50,
+    max_z_percentile = 100,
     min_retained = 1,
-    far_percentile = 95,
     min_cluster_size = 0.45,
-    expansion = 2, 
-    small_cluster_policy = 'reassign',
+    z = 2, 
+    max_scr_rounds = 10,
     post_reassignment_policy = 'noise',
 )
 NOISE_LABEL: int = -1
@@ -90,51 +89,45 @@ def group_by_cluster_idx(classifications: NDArray[clust_idx_t])->list[list[int]]
     return [c for c in clusters if len(c) > 0]
 
 def _choose_cluster_to_join(
-    X: NDArray,
-    p: NDArray, core_label: clust_idx_t,
+    core_label: clust_idx_t,
     _nearby_idxs: NDArray[idx_t], 
-    _dists: NDArray[float_t], 
-    classifications_buff: NDArray[clust_idx_t], 
-    far: float,
-    orig_cluster_sizes: NDArray[size_t],
+    _dists: NDArray[float_t],
+    means: NDArray[float_t],
+    stds: NDArray[float_t],
+    max_z: float_t,
     min_cluster_size: int,
+    classifications_buff: NDArray[clust_idx_t], 
+    orig_cluster_sizes: NDArray[size_t],
 )->clust_idx_t:
-    """
-    Select the label whose neighbors best balance frequency, angular isotropy(enclosure), and closeness to the core point.
-    This mitigates joining far-away-but-dense clusters and can create more visually coherent structure
-    """
+    """Select the label with the highest z-filtered frequency"""
 
-    # Filter out neighbors that are far away or are in small clusters 
-    dist_mask: NDArray[np.bool_] = ((_dists <= far) & (_dists > 0))
-    _nearby_idxs, _dists = _nearby_idxs[dist_mask], _dists[dist_mask]
-
-    neighbor_labels: NDArray[clust_idx_t] = classifications_buff[_nearby_idxs]
-    sizes: NDArray[size_t] = orig_cluster_sizes[neighbor_labels] 
-    mask: NDArray[np.bool_] = ((neighbor_labels != core_label) & (sizes >= min_cluster_size))
-    if not mask.any():
-        if sizes.shape[0]:
-            return neighbor_labels[np.argmax(sizes)]
-        return core_label
+    # Filter neighbors
+    _labels: NDArray[clust_idx_t] = classifications_buff[_nearby_idxs]
+    sizes: NDArray[size_t] = orig_cluster_sizes[_labels]
+    mask: NDArray[np.bool] = (
+        (_labels != core_label) & 
+        (sizes >= min_cluster_size) & 
+        (_dists - means[_labels] <= max_z*stds[_labels])
+    )
     _nearby_idxs, _dists = _nearby_idxs[mask], _dists[mask]
+    del _labels, sizes
+    if not _nearby_idxs.shape[0]:
+        return core_label
 
-    # Group neighbors by label
-    label_to_subset: dict[clust_idx_t, Union[NDArray[idx_t], list[idx_t]]] = {classifications_buff[i]: [] for i in _nearby_idxs} 
-    if len(label_to_subset) == 1:
-        return classifications_buff[_nearby_idxs[0]]     
-    for i, idx in enumerate(_nearby_idxs):
-        label_to_subset[classifications_buff[idx]].append(idx_t(i)) 
-    label_to_subset = {k: np.array(v, dtype=idx_t) for k, v in label_to_subset.items()}
-
-    # Return the label whose neighbors have the best geometric support
+    # Count cluster representation
+    counts: dict[clust_idx_t, int] = {classifications_buff[i]: 0 for i in _nearby_idxs} 
+    if len(counts) == 1:
+        return classifications_buff[_nearby_idxs[0]] 
+    
+    for idx in _nearby_idxs:
+        counts[classifications_buff[idx]] += 1
+    
+    # Return the most popular label
     best_label: clust_idx_t
-    best_score: float = -np.inf
-    for curr_label, idxs in label_to_subset.items():
-        diff: NDArray[float_t] = (X[_nearby_idxs[idxs]] - p).astype(float_t)
-        diff /= np.linalg.norm(diff, axis=1, keepdims=True)
-        score: float_t = idxs.shape[0] - np.linalg.norm(np.sum(diff, axis=0, dtype=float_t)) # frequency * angular isotropy
-        score /= _dists[idxs[0]]
-        if score > best_score:
-            best_score = score
+    best_score: int = 0
+    for curr_label, n in counts.items():
+        if n > best_score: 
+            best_score = n
             best_label = curr_label
     return best_label
 
@@ -143,11 +136,12 @@ def _initialize_index(
     X: NDArray, 
     exact: bool, 
     nn_kwargs: dict[str, Any], 
+    connectivity: int,
     n_jobs: int = -1, 
     ids: NDArray[idx_t] = np.empty(0, dtype=idx_t)
 )->Union[NearestNeighbors, hnswlib.Index]:
     """
-    Initialize the kNN indenx
+    Initialize the kNN index
     """
 
     nn_kwargs = nn_kwargs.copy()
@@ -157,11 +151,13 @@ def _initialize_index(
         space: Literal['l2', 'ip', 'cosine'] = nn_kwargs.get("space", _DEFAULTS_AND_CONSTS['nn_kwargs']['hnsw']['space'])
         max_elements: int = int(nn_kwargs.pop('max_elements', X.shape[0]))
         ef_construction: int = int(nn_kwargs.pop('ef_construction', _DEFAULTS_AND_CONSTS['nn_kwargs']['hnsw']['ef_construction']))
+        ef_search: int = int(nn_kwargs.pop('ef_search', max(ef_construction, 2*connectivity)))
         M: int = int(nn_kwargs.pop('M', _DEFAULTS_AND_CONSTS['nn_kwargs']['hnsw']['M']))
 
         index = hnswlib.Index(space=space, dim=dim)
         index.init_index(max_elements=max_elements, ef_construction=ef_construction, M=M, **nn_kwargs)
         index.add_items(X, ids=(ids if ids.shape[0] else None), num_threads=n_jobs)
+        index.set_ef(ef_search)
     else:
         nn_kwargs['metric'] = nn_kwargs.pop('metric', _DEFAULTS_AND_CONSTS['nn_kwargs']['nearest_neighbors']['metric'])
         nn_kwargs['p'] = nn_kwargs.pop('p', _DEFAULTS_AND_CONSTS['nn_kwargs']['nearest_neighbors']['p'])
@@ -174,8 +170,7 @@ def _initialize_index(
 def _get_neighborhoods(
     X: NDArray, 
     connectivity: int, 
-    nn_obj: Union[hnswlib.Index, NearestNeighbors],
-    use_heuristics: bool = True
+    nn_obj: Union[hnswlib.Index, NearestNeighbors]
 )->tuple[NDArray[size_t], NDArray[idx_t], NDArray[float_t]]:
     """
     Generate nearest neighbors, their distances, and the number of copies, per point
@@ -185,18 +180,13 @@ def _get_neighborhoods(
     
     if isinstance(nn_obj, hnswlib.Index):
         idxs, dists = nn_obj.knn_query(X, k=min(n_copies_single + connectivity, X.shape[0]))
+        np.sqrt(dists, out=dists)
     else:
         dists, idxs = nn_obj.kneighbors(
             X, 
             n_neighbors=min(n_copies_single + connectivity, X.shape[0]), 
             return_distance=True
         )
-        params: dict = nn_obj.get_params()
-        metric: str = params.get('metric')
-        p: float = params.get('p')
-        if use_heuristics and metric == "minkowski": 
-            # Remove the power of 1/p as is done with the HNSW for l2 distance
-            np.power(dists, p, out=dists)
 
     # Calculate the number of copies of each point, accounting for potential HNSW error
     n_copies: NDArray[size_t] = np.array([ 
@@ -259,7 +249,7 @@ def _expand_graph_clusters(
     n_copies: NDArray[size_t],
     densities: NDArray[float_t], 
     dataset_scale: float,
-    expansion: float,
+    z: float,
     min_retained: int,
     expansion_neighbors: int,
     
@@ -278,11 +268,11 @@ def _expand_graph_clusters(
     # Edge cases
     if X.shape[0] < 1:
         n_clusters_buff.data = 0
-        return
+        return np.array([], dtype=float_t), np.array([], dtype=float_t)
     elif dataset_scale <= 0:
         classifications_buff[:] = 0
         n_clusters_buff.data = 1
-        return
+        return np.array([], dtype=float_t), np.array([], dtype=float_t)
 
     N: int = X.shape[0]
 
@@ -318,6 +308,10 @@ def _expand_graph_clusters(
     node_ptrs: list[Optional[LinkedList.Node[idx_t]]] = [None for _ in range(N)]
     for node in ordered_idxs:
         node_ptrs[node.data] = node 
+
+    # Save means and std deviations as clusters complete
+    means: deque[float_t] = deque()
+    stds: deque[float_t] = deque()
 
     # Clustering
     curr_cluster_idx: int = 0
@@ -356,7 +350,7 @@ def _expand_graph_clusters(
             # Filter for positive z-score, not absolute value, so that nearby points are always included
             mask = (
                 (nearby_dists - running_avg_edge_len)
-                <= expansion*running_edge_len_deviation 
+                <= z*running_edge_len_deviation 
             ) 
             nearby, nearby_dists = nearby[mask], nearby_dists[mask]
 
@@ -393,6 +387,10 @@ def _expand_graph_clusters(
                     end=""
                 )
         
+        # Save mean and std
+        means.append(running_avg_edge_len)
+        stds.append(running_edge_len_deviation)
+
         # Increment cluster index
         curr_cluster_idx += 1
         n_clusters_buff.data = curr_cluster_idx
@@ -404,24 +402,22 @@ def _expand_graph_clusters(
             end=""
         )
 
+    return np.array(means, dtype=float_t), np.array(stds, dtype=float_t)
+
 def _reassign_clusters(
     X: NDArray, 
-
-    use_heuristics: bool,
-    
     neighbors: NDArray[idx_t],
     dists: NDArray[float_t],
     n_copies: NDArray[size_t],
     densities: NDArray[float_t],
     dataset_scale: float,
-
-    expansion_neighbors: int,
+    means: NDArray[float_t],
+    stds: NDArray[float_t],
+    max_z: float_t,
     min_cluster_size: int,
-    small_cluster_policy: Literal['reassign', 'noise'],
-    post_reassignment_policy: Literal['noise', 'none'],
     reassignment_neighbors: int,
-    far_percentile: float,
-    
+    max_rounds: int,
+    post_reassignment_policy: Literal['noise', 'none'],
     classifications_buff: NDArray[clust_idx_t],
     n_clusters_buff: _ClusterCount_Ref,
     show_progress: bool = False,
@@ -431,95 +427,103 @@ def _reassign_clusters(
         n_clusters_buff.data = 0
         return 
     elif dataset_scale <= 0:
-        classifications_buff[:] = 0    
+        classifications_buff[:] = 0
         n_clusters_buff.data = 1
         return 
 
     N: int = X.shape[0]
 
-    # Aquire points to relabel and, if we are reassigning, the sizes of their clusters
-    recluster_list: Union[list[int], NDArray[idx_t], deque[int]] = []
-    orig_cluster_sizes: Union[list[int], NDArray[size_t]] = [] 
-    for g in group_by_cluster_idx(classifications_buff):
-        if len(g) < min_cluster_size:
-            recluster_list.extend(g)
-        if small_cluster_policy == 'reassign':
-            orig_cluster_sizes.append(len(g))
-        g.clear()
-    recluster_list = np.array(recluster_list, dtype=idx_t)
-    orig_cluster_sizes = np.array(orig_cluster_sizes, dtype=size_t)
+    if max_rounds > 0:
+        # Get the sizes of the clusters
+        orig_cluster_sizes: Union[list, NDArray[size_t]] = []
+        groups: list[list[int]] = group_by_cluster_idx(classifications_buff)
+        if len(groups) < 2:
+            del groups
+        else:
+            orig_cluster_sizes = np.array([len(g) for g in groups], dtype=size_t)
+
+    if max_rounds > 0 and len(orig_cluster_sizes) > 1:
+        # Clip min cluster size to second largest to ensure at least 2 clusters post-reassignment
+        second_max: float_t = np.max(np.delete(orig_cluster_sizes, np.argmax(orig_cluster_sizes)))
+        min_cluster_size = min(int(second_max), min_cluster_size)
+        
+        # Get the list of points to recluster
+        recluster_list: Union[list[int], NDArray[idx_t], LinkedList[idx_t]] = []
+        for g in groups:
+            if len(g) < min_cluster_size:
+                recluster_list.extend(g)
+            g.clear()
+        del groups
     
-    # Reassigning: Reassign points of clusters that are too small to larger clusters
-    if small_cluster_policy == 'reassign':
         # Sort the points for reclustering in the reverse density order since dense regions are typically seeded first,
         # allowing them to grow into large clusters
+        recluster_list = np.array(recluster_list, dtype=idx_t)
         recluster_list = recluster_list[np.argsort(densities[recluster_list])[::-1]]
 
-        # Define a notion of 'far' beyond which other-cluster neighbors cannot be considered for joining
-        far: float = np.inf
-        if far_percentile < 100:
-            far = float(np.percentile(dists[:, reassignment_neighbors], far_percentile))
-        
-        # Perform reassignment
-        recluster_list = deque(recluster_list)
+        # Transform to linked list for efficient arbitrary-location popping
+        recluster_list = LinkedList(recluster_list)
         n_to_recluster: int = len(recluster_list)
+        
+        # Perform reassignment, looping til no more pops occur
+        n_rounds: int = 0
+        n_popped: int = 0
         n_reclustered: int = 0
-        log2N: int = max(1, int(np.log2(N)))
-        while len(recluster_list):
-            idx: int = recluster_list.popleft()
-            k: int = min(
-                reassignment_neighbors,
-                max( 
-                    log2N,
-                    expansion_neighbors,
-                    int(np.sqrt( min_cluster_size * orig_cluster_sizes[classifications_buff[idx]] )),
-                ) if use_heuristics
-                else reassignment_neighbors
-            )
-            _n_copies: size_t = n_copies[idx]
-            _nearby_idxs: NDArray[idx_t] = neighbors[idx][:_n_copies + k]
-            _dists: NDArray[float_t] = dists[idx][:_n_copies + k]
-            if len(_nearby_idxs) <= _n_copies:
-                continue
-            
-            classifications_buff[idx] = _choose_cluster_to_join(
-                X, X[idx], classifications_buff[idx], _nearby_idxs, _dists, classifications_buff, 
-                far, orig_cluster_sizes, min_cluster_size,
-            )
-            
-            if show_progress:
-                n_reclustered += 1
-                print(
-                    f"\r\033[K| Reassigning points: {round(n_reclustered/n_to_recluster*100, 2)}%",
-                    end=""
-                )
+        while len(recluster_list) and n_rounds < max_rounds and (n_popped > 0 or n_rounds < 1):
+            n_popped = 0
+            node_ptr: LinkedList.Node[idx_t] = recluster_list.head
 
-        # Cleanup remaining small clusters
-        if post_reassignment_policy == 'noise':
-            groups: list[list[int]] = group_by_cluster_idx(classifications_buff)
-            remaining: int = sum(len(g) for g in groups if len(g) < min_cluster_size)
-            handled: int = 0
-            for g in groups:
-                if len(g) < min_cluster_size:
-                    classifications_buff[g] = NOISE_LABEL
-                    handled += len(g)
+            while node_ptr is not None:
+                idx: idx_t = node_ptr.data
+                _n_copies: size_t = n_copies[idx]
+                _nearby_idxs: NDArray[idx_t] = neighbors[idx, _n_copies : _n_copies + reassignment_neighbors]
+                _dists: NDArray[float_t] = dists[idx, _n_copies : _n_copies + reassignment_neighbors]
+                
+                if not len(_nearby_idxs):
+                    node_ptr = node_ptr.next
+                    continue
+                
+                old_label: clust_idx_t = classifications_buff[idx]
+                new_label: clust_idx_t = _choose_cluster_to_join(
+                    old_label, _nearby_idxs, _dists,
+                    means, stds, max_z, 
+                    min_cluster_size, classifications_buff, orig_cluster_sizes,
+                )
+                if new_label != old_label:
+                    classifications_buff[idx] = new_label
+
+                    next = node_ptr.next
+                    if orig_cluster_sizes[new_label] >= min_cluster_size:
+                        recluster_list.pop(node_ptr)
+                        n_popped += 1
+                    node_ptr = next
+                    
                     if show_progress:
+                        n_reclustered += (orig_cluster_sizes[new_label] >= min_cluster_size)
                         print(
-                            f"\r\033[K| Assigning remainder to noise: {round(handled/remaining*100, 2)}%",
+                            f"\r\033[K| Reassigning points: {round(n_reclustered/n_to_recluster*100, 2)}%",
                             end=""
                         )
-                g.clear()
+                else:
+                    node_ptr = node_ptr.next
 
-    # Noise: Treat the small clusters as noise
-    else:
-        classifications_buff[recluster_list] = NOISE_LABEL
-        if show_progress:
-            print(
-                f"\r\033[K| Assigned remainder to noise: 100%",
-                end=""
-            )
-    
-    del recluster_list
+            n_rounds += 1
+        
+        del recluster_list, orig_cluster_sizes
+        
+    # Cleanup remaining small clusters
+    if post_reassignment_policy == 'noise':
+        handled: int = 0
+        g: list[int]
+        for g in group_by_cluster_idx(classifications_buff):
+            if len(g) < min_cluster_size:
+                classifications_buff[g] = NOISE_LABEL
+            handled += len(g)
+            if show_progress:
+                print(
+                    f"\r\033[K| Assigning remainder to noise: {round(handled/N*100, 2)}%",
+                    end=""
+                )
+            g.clear()
  
     # Redetermine cluster indexes/labels - indexes should have no gaps from the min to the max
     curr_cluster_idx: int
@@ -531,7 +535,7 @@ def _reassign_clusters(
         if show_progress:
             print(f"\r\033[K| Densifying labels: {handled/N*100}%", end="")
         g.clear()
-
+    
     # Recalculate the number of clusters
     n_clusters_buff.data = int(np.max(classifications_buff) + 1)
         
@@ -544,49 +548,46 @@ class SPORE(BaseEstimator, ClusterMixin):
     **SPORE (Skeleton Propagation Over Recalibrating Expansions)** clusters data by BFS-expanding 
     subgraphs of a global k-NN graph, seeded in descending order of local density. Edges are accepted only 
     if their distance falls within a z-score threshold of the cluster's running mean and standard deviation.
-    After initial assignment, small clusters may be merged into larger neighbors using 
-    a composite score weighing proximity, relative size, density, and angular isotropy. 
-    This yields robustness to both nonconvex geometry (driven by expansion) and weak separation (conservative expansion + merging).        
+    After initial assignment, small clusters may be decomposed and reassigned into larger nearby clusters 
+    through a k-NN-vote based label propagation procedure.     
     """
 
     class DataIndex:
         def __init__(
             self, connectivity=None, n_copies=None, neighbors=None, dists=None, 
-            dataset_scale=None, use_heuristics=None,
+            dataset_scale=None, 
         ):
             self.connectivity = connectivity
             self.n_copies = n_copies
             self.neighbors = neighbors
             self.dists = dists
             self.dataset_scale = dataset_scale
-            self.use_heuristics = use_heuristics
         
         def clear(self):
             self.connectivity = \
             self.n_copies = self.neighbors = self.dists = \
-            self.dataset_scale = self.use_heuristics = None
+            self.dataset_scale = None
 
     def __init__( 
         self,
-        neighborhood_percentile: Optional[float] = None, 
+        z_percentile: Optional[float] = None, 
         retention_rate: Optional[float] = None, 
         min_cluster_size: Optional[Union[float, int]] = None, 
         seeding_order: Optional[Literal['none', 'random', 'density']] = None, 
+        max_z_percentile: Optional[float_t] = None,
         
-        expansion: Optional[float] = None, 
+        z: Optional[float] = None, 
+        max_z: Optional[float_t] = None,
         expansion_neighbors: Optional[int] = None, 
         min_retained: Optional[int] = None, 
-        far_percentile: Optional[float] = None, 
         reassignment_neighbors: Optional[int] = None, 
         density_neighbors: Optional[int] = None, 
         min_connectivity: Optional[int] = None,
         max_connectivity: Optional[int] = None, 
-        small_cluster_policy: Optional[Literal['reassign', 'noise']] = None, 
+        max_scr_rounds: Optional[int] = None,
         post_reassignment_policy: Optional[Literal['noise', 'none']] = None, 
         dindex: Optional[DataIndex] = None, 
         manage_dindex: Optional[bool] = None, 
-        
-        use_heuristics: Optional[bool] = None, 
         
         exact_knn: Optional[bool] = None, 
         nn_kwargs: Optional[dict[str, Any]] = None, 
@@ -595,18 +596,18 @@ class SPORE(BaseEstimator, ClusterMixin):
         n_jobs: Optional[int] = None, 
         
         show_progress: Optional[bool] = None, 
-    ): 
+    ):
         """
         Initialize SPORE
 
         Parameters
         ----------
-        neighborhood_percentile : float, optional
+        z_percentile : float, optional
             Percentile of the k-th nearest neighbor distance (with `k = expansion_neighbors`),
-            converted to a z-score and used to estimate the expansion threshold.
-            This parameter has lower precedence than `expansion`; if `expansion` is provided,
+            converted to a z-score and used to estimate the expansion-phase threshold.
+            This parameter has lower precedence than `z`; if `z` is provided,
             this value is ignored. 
-            This parameter is intended as a bounded, less-sensitive way to estimate `expansion`.
+            This parameter is intended as a bounded, less-sensitive way to estimate `z`.
 
         retention_rate : float, optional
             Fractional version of `min_retained`, scaled relative to `expansion_neighbors`.
@@ -614,8 +615,11 @@ class SPORE(BaseEstimator, ClusterMixin):
             is generally more stable and easier to tune across different neighbor counts.
 
         min_cluster_size : float or int, optional
-            The size above which reassignment will not be attempted for a post-expansion cluster. 
+            The size above which reassignment will not be attempted for a post-expansion-phase cluster. 
             A floating point value is internally computed as `N**min_cluster_size`.
+
+        max_z_percentile : float, optional
+            k-NN Percentile version of `max_z`
 
         seeding_order : {'none', 'random', 'density'}, optional
             Strategy used to determine the order in which cluster seeds are initialized:
@@ -625,10 +629,13 @@ class SPORE(BaseEstimator, ClusterMixin):
             - 'random': Seeds clusters in random order.
             - 'none': Uses the input data order without reordering.
 
-        expansion : float, optional
+        z : float, optional
             Upper z-score threshold on k-NN distance defining the boundary between normal
             density variation and abnormally large distances. Conceptually represents a
             cutoff for low-density transitions during cluster expansion.
+        
+        max_z : float, optional
+            Maximum z-score of points relative to candidate clusters during SCR.
 
         expansion_neighbors : int, optional
             Number of nearest neighbors considered during the expansion phase.
@@ -637,10 +644,6 @@ class SPORE(BaseEstimator, ClusterMixin):
             Minimum number of neighbors that must remain after filtering during expansion
             for traversal to continue. This prevents propagation through thin bridges
             between clusters or regions.
-
-        far_percentile : float, optional
-            Percentile of the k-th nearest neighbor distance (with `k = reassignment_neighbors`) 
-            defining a distance that is considered too far to join a cluster.
 
         reassignment_neighbors : int, optional
             Number of neighbors used when reassigning points.
@@ -655,12 +658,9 @@ class SPORE(BaseEstimator, ClusterMixin):
         max_connectivity : int, optional
             Maximum number of neighbors fetched per point when building the global k-NN
             graph. 
-            
-        small_cluster_policy : {'reassign', 'noise'}, optional
-            Policy for handling clusters that are smaller than the minimum size:
-            - 'reassign': Reassigns points from small clusters to nearby valid clusters,
-            subject to constraints.
-            - 'noise': Merges all small clusters into a single noise cluster.
+        
+        max_scr_rounds: int, optional
+            Maximum number of loops for the SCR phase
 
         post_reassignment_policy : {'noise', 'none'}, optional
             Policy applied after reassignment:
@@ -675,10 +675,6 @@ class SPORE(BaseEstimator, ClusterMixin):
         manage_dindex : bool, optional
             Whether the algorithm should automatically manage the lifecycle of `dindex`
             (e.g., replacing or clearing internal data as needed).
-
-        use_heuristics : bool, optional
-            Enables a collection of heuristics designed to improve stability, performance,
-            and execution speed.
 
         exact_knn : bool, optional
             Whether to use exact nearest-neighbor search. The algorithm can tolerate
@@ -703,16 +699,16 @@ class SPORE(BaseEstimator, ClusterMixin):
         """
 
         # Validate and save parameters
-        if neighborhood_percentile is not None:
-            _bounds_check(neighborhood_percentile, 0, 100, f"neighborhood percentile({neighborhood_percentile}) must be in the range [0,100]")
+        if z_percentile is not None:
+            _bounds_check(z_percentile, 0, 100, f"z_percentile({z_percentile}) must be in the range [0,100]")
+        if max_z_percentile is not None:
+            _bounds_check(max_z_percentile, 0, 100, f"max_z_percentile({max_z_percentile}) must be in the range [0,100]")
         if retention_rate is not None:
             _bounds_check(retention_rate, 0, 1, f"retention_rate({retention_rate}) must be in the range [0,1]")
-        if far_percentile is not None:
-            _bounds_check(far_percentile, 0, 100, f"far_percentile({far_percentile}) must be in the range [0, 100]")
         if seeding_order is not None and seeding_order not in ("none", "random", "density"):
             raise ValueError(f"seeding_order({seeding_order}) must be one of 'none', 'random', or 'density'")
-        if small_cluster_policy is not None and small_cluster_policy not in ("reassign", "noise"):
-            raise ValueError(f"small_cluster_policy({small_cluster_policy}) must be one of 'reassign' or 'noise'")
+        if max_scr_rounds is not None:
+            _bounds_check(max_scr_rounds, 0, np.inf, f"max_scr_rounds({max_scr_rounds}) must be in the range [0,inf)")
         if post_reassignment_policy is not None and post_reassignment_policy not in ("noise", "none"):
             raise ValueError(f"post_reassignment_policy({post_reassignment_policy}) must be one of 'noise' or 'none'")
         if shuffle_seed is not None:
@@ -730,7 +726,6 @@ class SPORE(BaseEstimator, ClusterMixin):
         self.shuffle_for_hnsw = shuffle_for_hnsw
         self.shuffle_seed = shuffle_seed
         self.seeding_order = seeding_order
-        self.use_heuristics = use_heuristics
         self.density_neighbors = density_neighbors
         self.retention_rate = retention_rate
         self.min_retained = min_retained 
@@ -738,11 +733,12 @@ class SPORE(BaseEstimator, ClusterMixin):
         self.reassignment_neighbors = reassignment_neighbors
         self.min_connectivity = min_connectivity
         self.max_connectivity = max_connectivity
-        self.expansion = expansion
-        self.neighborhood_percentile = neighborhood_percentile
-        self.far_percentile = far_percentile
+        self.z = z
+        self.max_z = max_z
+        self.z_percentile = z_percentile
+        self.max_z_percentile = max_z_percentile
         self.min_cluster_size = min_cluster_size
-        self.small_cluster_policy = small_cluster_policy
+        self.max_scr_rounds = max_scr_rounds
         self.post_reassignment_policy = post_reassignment_policy
         self.show_progress = show_progress
         self.labels_: Optional[NDArray[clust_idx_t]] = None
@@ -758,7 +754,6 @@ class SPORE(BaseEstimator, ClusterMixin):
         shuffle_for_hnsw = self.shuffle_for_hnsw
         shuffle_seed = self.shuffle_seed
         seeding_order = self.seeding_order
-        use_heuristics = self.use_heuristics
         density_neighbors = self.density_neighbors
         retention_rate = self.retention_rate
         min_retained = self.min_retained
@@ -766,11 +761,12 @@ class SPORE(BaseEstimator, ClusterMixin):
         reassignment_neighbors = self.reassignment_neighbors
         min_connectivity = self.min_connectivity
         max_connectivity = self.max_connectivity
-        expansion = self.expansion
-        neighborhood_percentile = self.neighborhood_percentile
-        far_percentile = self.far_percentile
+        z = self.z
+        max_z = self.max_z
+        z_percentile = self.z_percentile
+        max_z_percentile = self.max_z_percentile
         min_cluster_size = self.min_cluster_size
-        small_cluster_policy = self.small_cluster_policy
+        max_scr_rounds = self.max_scr_rounds
         post_reassignment_policy = self.post_reassignment_policy
         show_progress = self.show_progress
 
@@ -817,56 +813,56 @@ class SPORE(BaseEstimator, ClusterMixin):
         shuffle_for_hnsw = (shuffle_for_hnsw if shuffle_for_hnsw is not None else _DEFAULTS_AND_CONSTS['shuffle_for_hnsw'])
         shuffle_seed = (shuffle_seed if shuffle_seed is not None else _DEFAULTS_AND_CONSTS['shuffle_seed'])
         seeding_order = (seeding_order if seeding_order is not None else _DEFAULTS_AND_CONSTS['seeding_order'])
-        use_heuristics = (use_heuristics if use_heuristics is not None else _DEFAULTS_AND_CONSTS['use_heuristics'])
         min_connectivity = (min_connectivity if min_connectivity is not None else _DEFAULTS_AND_CONSTS['min_connectivity'])
-        max_connectivity = (max_connectivity if max_connectivity is not None else N - 1)
-        far_percentile = (
-            far_percentile if far_percentile is not None 
-            else _DEFAULTS_AND_CONSTS['far_percentile'] if use_heuristics
-            else 100
-        )
-        small_cluster_policy = (small_cluster_policy if small_cluster_policy is not None else _DEFAULTS_AND_CONSTS['small_cluster_policy'])
-        post_reassignment_policy = (post_reassignment_policy if post_reassignment_policy is not None else _DEFAULTS_AND_CONSTS['post_reassignment_policy'])
-        show_progress = (show_progress if show_progress is not None else _DEFAULTS_AND_CONSTS['show_progress'])
-
-        if expansion is not None:
-            neighborhood_percentile = None
-        elif neighborhood_percentile is None:
-            neighborhood_percentile = _DEFAULTS_AND_CONSTS['neighborhood_percentile']
-        
-        log2N = max(1, int(np.log2(N)))
-        if expansion_neighbors is None:
-            expansion_neighbors = min(max_connectivity, int(N**0.4), 2*log2N)
-        min_retained = (
-            max(int(retention_rate * expansion_neighbors), 1) if retention_rate is not None
-            else _DEFAULTS_AND_CONSTS['min_retained'] if min_retained is None
-            else min_retained
-        )
-        if density_neighbors is None: 
-            density_neighbors = min(max_connectivity, log2N)
-        
         min_cluster_size = int(
             (
                 min_cluster_size if min_cluster_size >= 1 else int(N**min_cluster_size)
             ) if min_cluster_size is not None
             else int(N**_DEFAULTS_AND_CONSTS['min_cluster_size']) 
         )
+        max_connectivity = (max_connectivity if max_connectivity is not None else N - 1)
+        max_scr_rounds = (max_scr_rounds if max_scr_rounds is not None else _DEFAULTS_AND_CONSTS['max_scr_rounds'])
+        post_reassignment_policy = (post_reassignment_policy if post_reassignment_policy is not None else _DEFAULTS_AND_CONSTS['post_reassignment_policy'])
+        show_progress = (show_progress if show_progress is not None else _DEFAULTS_AND_CONSTS['show_progress'])
+
+        if z is not None:
+            z_percentile = None
+        elif z_percentile is None:
+            z_percentile = _DEFAULTS_AND_CONSTS['z_percentile']
+
+        if max_z is not None:
+            max_z_percentile = None
+        elif max_z_percentile is None:
+            max_z_percentile = _DEFAULTS_AND_CONSTS['max_z_percentile']
+        
+        log2N = max(1, int(np.log2(N)))
+        density_neighbors = min(
+            max_connectivity, 
+            density_neighbors if density_neighbors is not None
+            else max(1, expansion_neighbors//2) if expansion_neighbors is not None
+            else min(min_cluster_size, log2N)
+        )
+        expansion_neighbors = min(
+            max_connectivity, 
+            expansion_neighbors if expansion_neighbors is not None
+            else min(min_cluster_size, 2*density_neighbors)
+        )
         reassignment_neighbors = min(
             max_connectivity,
             reassignment_neighbors if reassignment_neighbors is not None
-            else min(
-                _bounded_sample_count(N, 4*log2N),
-                min_cluster_size,
-            ) if use_heuristics 
-            else min_cluster_size
+            else min(min_cluster_size, 2*expansion_neighbors)
+        )
+        min_retained = (
+            max(int(retention_rate * expansion_neighbors), 1) if retention_rate is not None
+            else _DEFAULTS_AND_CONSTS['min_retained'] if min_retained is None
+            else min_retained
         )
 
         # Define final connectivity (degree of the knn graph)
         connectivity = min(max_connectivity, max(density_neighbors, reassignment_neighbors, expansion_neighbors, min_connectivity))
 
         # Potentially clear out the DataIndex object to be repopulated later
-        if dindex is not None and manage_dindex and \
-        (dindex.connectivity != connectivity or dindex.use_heuristics != use_heuristics): 
+        if dindex is not None and manage_dindex and dindex.connectivity != connectivity: 
             dindex.clear()
         
         # Save resolved values within self
@@ -878,7 +874,6 @@ class SPORE(BaseEstimator, ClusterMixin):
         self.shuffle_for_hnsw_ = shuffle_for_hnsw
         self.shuffle_seed_ = shuffle_seed
         self.seeding_order_ = seeding_order
-        self.use_heuristics_ = use_heuristics
         self.connectivity_ = connectivity
         self.density_neighbors_ = density_neighbors
         self.retention_rate_ = retention_rate
@@ -887,11 +882,12 @@ class SPORE(BaseEstimator, ClusterMixin):
         self.reassignment_neighbors_ = reassignment_neighbors
         self.min_connectivity_ = min_connectivity
         self.max_connectivity_ = max_connectivity
-        self.expansion_ = expansion
-        self.neighborhood_percentile_ = neighborhood_percentile
-        self.far_percentile_ = far_percentile
+        self.expansion_ = z
+        self.z_percentile_ = z_percentile
+        self.max_z_percentile_ = max_z_percentile
+        self.max_z_ = max_z
         self.min_cluster_size_ = min_cluster_size
-        self.small_cluster_policy_ = small_cluster_policy
+        self.max_scr_rounds_ = max_scr_rounds
         self.post_reassignment_policy_ = post_reassignment_policy
         self.show_progress_ = show_progress
 
@@ -906,12 +902,12 @@ class SPORE(BaseEstimator, ClusterMixin):
         dindex = self._dindex
 
         N = X.shape[0]
-        use_heuristics = self.use_heuristics_
         connectivity = self.connectivity_
         expansion_neighbors = self.expansion_neighbors_
         exact_knn = self.exact_knn_
         nn_kwargs = self.nn_kwargs_.copy()
-        neighborhood_percentile = self.neighborhood_percentile_
+        z_percentile = self.z_percentile_
+        max_z_percentile = self.max_z_percentile_
         n_jobs = self.n_jobs_
         shuffle_for_hnsw = self.shuffle_for_hnsw_
         shuffle_seed = self.shuffle_seed_
@@ -930,7 +926,7 @@ class SPORE(BaseEstimator, ClusterMixin):
                 (metric is None or metric == "minkowski")
             ):
                 dataspace_dims: NDArray[float_t] = (np.max(X, axis=0) - np.min(X, axis=0)).astype(float_t)
-                dataset_scale = float(np.power(np.linalg.norm(dataspace_dims), 1 + use_heuristics))
+                dataset_scale = float(np.linalg.norm(dataspace_dims))
 
             if not exact_knn and "random_seed" not in nn_kwargs:
                 nn_kwargs = dict(**nn_kwargs, random_seed=_DEFAULTS_AND_CONSTS['nn_kwargs']['hnsw']['random_seed'])
@@ -941,23 +937,45 @@ class SPORE(BaseEstimator, ClusterMixin):
             
             nn_obj = _initialize_index(
                 (X[shuffled_idxs] if shuffled_idxs.shape[0] else X), exact=exact_knn, nn_kwargs=nn_kwargs, 
-                n_jobs=n_jobs, ids=shuffled_idxs
+                connectivity=connectivity, n_jobs=n_jobs, ids=shuffled_idxs
             )
-            n_copies, neighbors, dists = _get_neighborhoods(X=X, connectivity=connectivity, nn_obj=nn_obj, use_heuristics=use_heuristics)
+            n_copies, neighbors, dists = _get_neighborhoods(X=X, connectivity=connectivity, nn_obj=nn_obj)
 
-        # Compute expansion from a percentile of knn distance
-        if neighborhood_percentile is not None and not dindex_only:
+        # Compute `z` and `max_z` from percentile of knn distance
+        if (z_percentile is not None or max_z_percentile is not None) \
+        and not dindex_only:
             neighborhoods: NDArray[float_t] = dists[:, expansion_neighbors]
             mean_neighborhood: float_t = np.mean(neighborhoods, dtype=float_t)
             std_neighborhood: float_t = np.std(neighborhoods, dtype=float_t)
             neighborhoods = neighborhoods[neighborhoods >= mean_neighborhood]
-            self.expansion_ = (
-                (
-                    np.percentile(neighborhoods, neighborhood_percentile) - mean_neighborhood
-                ) / std_neighborhood 
-                if std_neighborhood > 0 
-                else 0.0
-            )
+            
+            if z_percentile is not None and max_z_percentile is not None:
+                self.expansion_, self.max_z_ = (
+                    (
+                        (
+                            np.percentile(neighborhoods, np.array([z_percentile, max_z_percentile])) - mean_neighborhood
+                        ).astype(float_t) / std_neighborhood 
+                    ) if std_neighborhood > 0 
+                    else (float_t(0.0), float_t(0.0))
+                )
+            elif z_percentile is not None:
+                self.expansion_ = (
+                    (
+                        float_t(
+                            np.percentile(neighborhoods, z_percentile) - mean_neighborhood
+                        ) / std_neighborhood 
+                    ) if std_neighborhood > 0 
+                    else float_t(0.0)
+                )
+            elif max_z_percentile is not None:
+                self.max_z_ = (
+                    (
+                        float_t(
+                            np.percentile(neighborhoods, max_z_percentile) - mean_neighborhood
+                        ) / std_neighborhood 
+                    ) if std_neighborhood > 0 
+                    else float_t(0.0)
+                )
 
         # Save results within the self and potentially update the DataIndex object
         self._neighbors = neighbors
@@ -968,8 +986,8 @@ class SPORE(BaseEstimator, ClusterMixin):
         if manage_dindex or dindex_only:
             dindex.connectivity, \
             dindex.n_copies, dindex.neighbors, dindex.dists, \
-            dindex.dataset_scale, dindex.use_heuristics = (
-                self.connectivity_, n_copies, neighbors, dists, dataset_scale, use_heuristics,
+            dindex.dataset_scale = (
+                self.connectivity_, n_copies, neighbors, dists, dataset_scale
             )
 
         # Perform clustering if desired
@@ -987,15 +1005,14 @@ class SPORE(BaseEstimator, ClusterMixin):
 
         seeding_order = self.seeding_order_
         shuffle_seed = self.shuffle_seed_
-        use_heuristics = self.use_heuristics_
         density_neighbors = self.density_neighbors_
         min_retained = self.min_retained_
         expansion_neighbors = self.expansion_neighbors_
         reassignment_neighbors = self.reassignment_neighbors_
-        expansion = self.expansion_
-        far_percentile = self.far_percentile_
+        z = self.expansion_
+        max_z = self.max_z_
         min_cluster_size = self.min_cluster_size_
-        small_cluster_policy = self.small_cluster_policy_
+        max_scr_rounds = self.max_scr_rounds_
         post_reassignment_policy = self.post_reassignment_policy_
         show_progress = self.show_progress_
         dists = self._dists
@@ -1014,11 +1031,11 @@ class SPORE(BaseEstimator, ClusterMixin):
         )
         
         # Expansion
-        _expand_graph_clusters(
+        means, stds = _expand_graph_clusters(
             X=X, seeding_order=seeding_order, 
             neighbors=neighbors, dists=dists, n_copies=n_copies,
             densities=densities, dataset_scale=dataset_scale, 
-            expansion=expansion, min_retained=min_retained, expansion_neighbors=expansion_neighbors,  
+            z=z, min_retained=min_retained, expansion_neighbors=expansion_neighbors,  
             classifications_buff=classifications_buff, n_clusters_buff=n_clusters_buff, 
             shuffle_seed=shuffle_seed,
             show_progress=show_progress,
@@ -1027,12 +1044,14 @@ class SPORE(BaseEstimator, ClusterMixin):
         if min_cluster_size > 1:
             # Reassignment
             _reassign_clusters(
-                X=X, use_heuristics=use_heuristics, 
-                neighbors=neighbors, dists=dists, n_copies=n_copies, 
-                densities=densities, dataset_scale=dataset_scale,
-                expansion_neighbors=expansion_neighbors, min_cluster_size=min_cluster_size, 
-                small_cluster_policy=small_cluster_policy, post_reassignment_policy=post_reassignment_policy, 
-                reassignment_neighbors=reassignment_neighbors, far_percentile=far_percentile,
+                X=X, 
+                neighbors=neighbors, dists=dists, n_copies=n_copies, densities=densities,
+                dataset_scale=dataset_scale, 
+                means=means, stds=stds, max_z=max_z,
+                min_cluster_size=min_cluster_size, 
+                reassignment_neighbors=reassignment_neighbors, 
+                max_rounds=max_scr_rounds,
+                post_reassignment_policy=post_reassignment_policy, 
                 classifications_buff=classifications_buff, n_clusters_buff=n_clusters_buff, 
                 show_progress=show_progress, 
             )
