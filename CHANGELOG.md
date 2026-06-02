@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.0 (2026-06-02)
+
+### Features
+
+- Simplify and improve SCR with z-score-filtered k-NN popularity vote
+  ([`f9b8d56`](https://github.com/RandyWAidoo/SPORE/commit/f9b8d562007c6ced144510a210275b35ec58f5be))
+
+
 ## v0.1.2 (2026-04-17)
 
 ### Bug Fixes
